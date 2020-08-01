@@ -4,6 +4,7 @@ const pino = require('pino')
 const pull = require('pull-stream')
 const connect = require('ssb-client')
 const colors = require('colorette')
+const wrap = require('word-wrap')
 
 const dbg = pino(pino.destination(2)) // log to stderr
 
@@ -29,39 +30,85 @@ const constants = {
 
 const { gray, whiteBright: white, bold, black, bgWhite, bgYellow } = colors
 
-const colorMap = {}
-const nameMap = {}
-
 function randomColor () {
   const colorList = ['green', 'cyan', 'magenta', 'blue', 'red']
   return colorList[Math.floor(Math.random() * colorList.length)]
 }
 
-function getAuthorColor (author) {
-  if (!colorMap[author]) {
-    colorMap[author] = randomColor()
+
+class MessageStore {
+  constructor () {
+    this.msgs = []
+    this.colorMap = {}
+    this.nameMap = {}
+    this.realMsgLength = 0
   }
-  return colorMap[author]
+
+  getMaxMsgs () {
+    return process.stdout.rows - 3
+  }
+
+  getAuthorColor (author) {
+    if (!this.colorMap[author]) {
+      this.colorMap[author] = randomColor()
+    }
+    return this.colorMap[author]
+  }
+
+  colorAuthor (author) {
+    return `${bold(colors[this.getAuthorColor(author)](author))}`
+  }
+
+  addMsg (msg) {
+    this.msgs.push(msg)
+    this.msgs.sort((a, b) => a.sentAt - b.sentAt)
+    this.pretty() // calculates real msg length
+
+    if (this.realMsgLength > this.getMaxMsgs()) {
+      this.msgs.shift() // take one off the top
+    }
+  }
+
+  getName (authorId) {
+    return this.nameMap[authorId]
+  }
+
+  identifyAuthor (authorId, authorName) {
+    this.nameMap[authorId] = authorName
+    if (this.colorMap[authorId]) {
+      this.colorMap[authorName] = this.colorMap[authorId]
+    }
+
+    // find instances of the ID in the msg list and change it to name
+    for (let existingMsg of this.msgs) {
+      if (existingMsg.author === authorId) {
+        existingMsg.author = authorName
+      }
+    }
+  }
+
+  pretty () {
+    const msgList = this.msgs.map(({ author, timestamp, text }) => {
+      const formattedTs = `[${gray(timestamp)}] `
+      const formattedAuthor = `${this.colorAuthor(author)}: `
+      const wrappedText = wrap(text, { width: process.stdout.columns - formattedTs.length - formattedAuthor.length, indent: '' })
+      const formattedText = wrappedText.split('\n')
+        .map(line => author === constants.SYSTEM ? bgYellow(black(line)) : white(line))
+        .join('\n')
+      return `${formattedTs}${formattedAuthor}${formattedText}`
+    }).join('\n')
+    const lines = msgList.split('\n').length
+    const space = this.getMaxMsgs() - lines
+    const spaceLines = space > 0 ? '\n'.repeat(space) : ''
+
+    this.realMsgLength = lines
+
+    dbg.info('we believe there are %d lines so we made %d lines of space', lines, spaceLines.length)
+
+    return `${msgList}${spaceLines}`
+  }
 }
 
-function colorAuthor (author) {
-  return `${bold(colors[getAuthorColor(author)](author))}`
-}
-
-function getMaxVisibleMsgs () {
-  return process.stdout.rows - 3
-}
-
-function getSpacer (msgsLength) {
-  return '\n'.repeat(getMaxVisibleMsgs() - msgsLength)
-}
-
-function getPrintableMsgs (msgs) {
-  return msgs.map(({ author, timestamp, text }) => {
-    const textFormatted = author === constants.SYSTEM ? bgYellow(black(text)) : white(text)
-    return `[${gray(timestamp)}] ${colorAuthor(author)}: ${textFormatted}`
-  }).join('\n')
-}
 
 function ts (timestamp) {
   const ts = new Date(timestamp)
@@ -69,28 +116,23 @@ function ts (timestamp) {
 }
 
 async function processor (diffy, server) {
-  const msgs = []
+  const msgs = new MessageStore()
   const meId = server.id
 
   // setup ui
-  diffy.render(() => `${getPrintableMsgs(msgs)}${getSpacer(msgs.length)}\n> ${input.line()}`)
+  diffy.render(() => `${msgs.pretty()}\n> ${input.line()}`)
 
   return {
     incoming: (msg) => {
-      if (msgs.length >= getMaxVisibleMsgs()) {
-        msgs.shift()
-      }
       if (!msg || !msg.value || !msg.value.content || msg.value.content.type !== constants.MESSAGE_TYPE) {
         return
       }
-      if (!nameMap[msg.value.author] && server.about) {
+
+      // if we don't know author name already, try to get it
+      if (!msgs.getName(msg.value.author) && server.about) {
         server.about.socialValue({ key: 'name', dest: msg.value.author })
           .then((authorName) => {
-            nameMap[msg.value.author] = authorName
-            for (let existingMsg of msgs) {
-              if (existingMsg.author === msg.value.author) existingMsg.author = authorName
-            }
-            if (colorMap[msg.value.author]) colorMap[authorName] = colorMap[msg.value.author]
+            msgs.identifyAuthor(msg.value.author, authorName)
             diffy.render()
           })
           .catch((err) => {
@@ -100,10 +142,11 @@ async function processor (diffy, server) {
         
       const scatMsg = {
         timestamp: ts(msg.value.timestamp),
-        author: nameMap[msg.value.author] || msg.value.author,
+        sentAt: msg.value.timestamp,
+        author: msgs.getName(msg.value.author) || msg.value.author,
         text: msg.value.content.text
       }
-      msgs.push(scatMsg)
+      msgs.addMsg(scatMsg)
       diffy.render()
     },
     outgoing: (line) => {
@@ -120,7 +163,12 @@ async function processor (diffy, server) {
       } else {
         server.publish({ type: constants.MESSAGE_TYPE, text: line })
           .catch((err) => {
-            msgs.push({ timestamp: ts(Date.now()), author: constants.SYSTEM, text: 'Failed to post message.' })
+            msgs.push({
+              timestamp: ts(Date.now()),
+              sentAt: msg.value.timestamp,
+              author: constants.SYSTEM,
+              text: 'Failed to post message.'
+            })
             diffy.render()
             dbg.error(err)
           })
