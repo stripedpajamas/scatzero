@@ -11,7 +11,7 @@ const { version } = require('./package.json')
 const dbg = pino(pino.destination(2)) // log to stderr
 
 const constants = {
-  SYSTEM: '<scat>',
+  SYSTEM: 'scat',
   DATE_TIME_OPTS: {
     month: 'numeric',
     year: 'numeric',
@@ -41,14 +41,13 @@ class MessageStore {
   constructor () {
     this.publicMsgs = []
     this.privateMsgs = new Map() // [recps] => [msgs]
+    this.channelMsgs = new Map() // channel => [msgs]
     this.msgs = this.publicMsgs
     this.colorMap = {}
     this.nameMap = {}
-    this.realMsgLength = 0
   }
 
   goPrivate (recps) {
-    dbg.info([...this.privateMsgs.entries()])
     const recpKey = recps.sort().toString()
     if (!this.privateMsgs.has(recpKey)) {
       this.privateMsgs.set(recpKey, [])
@@ -58,6 +57,14 @@ class MessageStore {
 
   goPublic () {
     this.msgs = this.publicMsgs
+  }
+
+  goChannel (channel) {
+    dbg.info('going into channel %s', channel)
+    if (!this.channelMsgs.has(channel)) {
+      this.channelMsgs.set(channel, [])
+    }
+    this.msgs = this.channelMsgs.get(channel)
   }
   
   getAuthorColor (author) {
@@ -72,6 +79,10 @@ class MessageStore {
   }
 
   addMsg (msg) {
+    if (msg.author === constants.SYSTEM) {
+      this.msgs.push(msg) // wherever we are, put the system msg there
+      return
+    }
     if (msg.private) {
       const recpsKey = msg.recps.map(ref => ref.link).sort().toString()
       if (!this.privateMsgs.has(recpsKey)) {
@@ -79,6 +90,13 @@ class MessageStore {
       } else {
         this.privateMsgs.get(recpsKey).push(msg)
         this.privateMsgs.get(recpsKey).sort((a, b) => a.sentAt - b.sentAt)
+      }
+    } else if (msg.channel) {
+      if (!this.channelMsgs.has(msg.channel)) {
+        this.channelMsgs.set(msg.channel, [msg])
+      } else {
+        this.channelMsgs.get(msg.channel).push(msg)
+        this.channelMsgs.get(msg.channel).sort((a, b) => a.sentAt - b.sentAt)
       }
     } else {
       this.publicMsgs.push(msg)
@@ -92,7 +110,7 @@ class MessageStore {
 
   getId (authorName) {
     if (ref.isFeed(authorName)) return authorName
-    return Object.keys(this.nameMap).find(id => this.nameMap[id] === authorName)
+    return Object.keys(this.nameMap).find(id => this.nameMap[id] === authorName) || authorName
   }
 
   identifyAuthor (authorId, authorName) {
@@ -111,36 +129,50 @@ class MessageStore {
     for (let [recps, privateMsgList] of this.privateMsgs.entries()) {
       if (recps.includes(authorId)) {
         for (let existingMsg of privateMsgList) {
-          existingMsg.author = authorName
+          if (existingMsg.author === authorId) {
+            existingMsg.author = authorName
+          }
         }
       }
     }
 
+    for (let channelMsgList of this.channelMsgs.values()) {
+      for (let existingMsg of channelMsgList) {
+        if (existingMsg.author === authorId) {
+          existingMsg.author = authorName
+        }
+      }
+    }
   }
 
   pretty (nonMsgSpace) {
     const msgList = this.msgs.map(({ author, timestamp, text }) => {
       const formattedTs = `[${gray(timestamp)}] `
-      const formattedAuthor = `${this.colorAuthor(author)}: `
+      const shortAuthor = author.slice(0, 20)
+      const formattedAuthor = `<${this.colorAuthor(shortAuthor)}> `
+      const nonMsgPrefixSize = shortAuthor.length + 3 + timestamp.length + 3
       const wrappedText = wrap(text, {
-        width: process.stdout.columns - (author.length + 2) - (timestamp.length + 3),
+        width: process.stdout.columns - nonMsgPrefixSize,
         indent: '',
-        cut: true
+        cut: true,
+        trim: true,
+        newline: `\n${' '.repeat(nonMsgPrefixSize)}`,
+        escape: (line) => author === constants.SYSTEM ? bgYellow(black(line)) : white(line)
       })
-      const formattedText = wrappedText.split('\n')
-        .map(line => author === constants.SYSTEM ? bgYellow(black(line)) : white(line))
-        .join('\n')
-      return `${formattedTs}${formattedAuthor}${formattedText}`
+      return `${formattedTs}${formattedAuthor}${wrappedText}`
     }).join('\n').split('\n')
 
     while (msgList.length > process.stdout.rows - nonMsgSpace) {
       msgList.shift() // remove single line from the top
     }
 
-    return `${msgList.join('\n')}`//${spaceLines}`
+    while (msgList.length < process.stdout.rows - nonMsgSpace) {
+      msgList.push('') // we also want to fill available space
+    }
+
+    return `${msgList.join('\n')}`
   }
 }
-
 
 function ts (timestamp) {
   const ts = new Date(timestamp)
@@ -161,19 +193,13 @@ async function processor (diffy, server) {
 
   let state = {
     recps: [],
-    private: false
+    private: false,
+    channel: ''
   }
 
   function header () {
     const inChannel = state.channel ? ` in ${state.channel}` : ''
-    let recps = state.recps.slice()
-    for (let i = 0; i < recps.length; i++) {
-      if (recps[i] === meId) {
-        recps.splice(i, 1) // remove exactly one instance of myself
-        break
-      }
-    }
-    recps = recps.map((id) => `${msgs.getName(id)} (${id})`)
+    let recps = [...new Set(state.recps)].map((id) => `${msgs.getName(id)} (${id})`)
     const pubPriv = state.private ? `Chatting Privately with ${recps}` : `Chatting Publicly${inChannel}`
     const front = `scat ${version} `
     const hl = wrap(pubPriv, {
@@ -184,12 +210,16 @@ async function processor (diffy, server) {
   }
 
   function footer () {
-    return 'Commands: /private <name|id>  /public  /channel <name>\n'
+    const foot = 'Commands: /private <name|id>  |  /public (leaves private or channel)  |  /channel <name>  (omit name for no channel)'
+    return wrap(foot, { width: process.stdout.columns, indent: '' })
   }
 
 
   // setup ui
   diffy.render(() => {
+    if (process.stdout.columns < constants.MIN_WIDTH) {
+      return bgYellow(black('Terminal is too small'))
+    }
     const head = header()
     const foot = footer()
     const inputLine = input.line()
@@ -220,6 +250,7 @@ async function processor (diffy, server) {
         timestamp: ts(msg.value.timestamp),
         sentAt: msg.value.timestamp,
         private: msg.value.private,
+        channel: msg.value.content.channel,
         recps: msg.value.content.recps,
         author: msgs.getName(msg.value.author) || msg.value.author,
         text: msg.value.content.text
@@ -228,6 +259,7 @@ async function processor (diffy, server) {
       diffy.render()
     },
     outgoing: (line) => {
+      if (!line || !line.trim()) return
       // handle commands
       if (line && line[0] === '/') {
         const wordBreak = line.indexOf(' ')
@@ -242,6 +274,7 @@ async function processor (diffy, server) {
             msgs.goPublic()
             state.private = false
             state.recps = []
+            state.channel = ''
             break
           }
           case 'private': {
@@ -253,12 +286,27 @@ async function processor (diffy, server) {
             } else if (!recps.length) {
               msgs.addMsg(systemMsg('Recipient name or id required.'))
             } else if (!recps.every(recp => ref.isFeed(recp))) {
-              msgs.addMsg(systemMsg('Unknown identifier'))
+              msgs.addMsg(systemMsg(`Unknown identifier: ${recps.filter(recp => !ref.isFeed(recp))}`))
             } else {
               recps.push(meId)
               msgs.goPrivate(recps)
               state.private = true
+              state.channel = ''
               state.recps = recps
+            }
+            break
+          }
+          case 'channel': {
+            let channel = line.slice(cmdEnd).trim().split(' ').filter(x => x).shift()
+            if (!channel || channel === '#') {
+              msgs.goPublic()
+              state.channel = ''
+            } else {
+              if (channel[0] !== '#') channel = `#${channel}`
+              msgs.goChannel(channel)
+              state.channel = channel
+              state.private = false
+              state.recps = []
             }
             break
           }
@@ -273,7 +321,7 @@ async function processor (diffy, server) {
               dbg.error(err)
             })
         } else {
-          server.publish({ type: constants.MESSAGE_TYPE, text: line })
+          server.publish({ type: constants.MESSAGE_TYPE, text: line, channel: state.channel })
             .catch((err) => {
               msgs.addMsg(systemMsg('Failed to send message.'))
               diffy.render()
@@ -286,11 +334,23 @@ async function processor (diffy, server) {
 }
 
 async function main () {
+  // don't waste time on tight terms
+  // we clip author names at 20
+  // timestamps are localized using ts()
+  // padding on authors and timestamps total to 6
+  // make sure we can at least fit timestamp+author+5 char msg
+  constants.MIN_WIDTH = 20 + ts(Date.now()).length + 6 + 5
+  if (process.stdout.columns < constants.MIN_WIDTH) {
+    console.error('scat requires a terminal width of at least %d', minWidth)
+    return
+  }
+
   let server
   try {
     server = await connect()
   } catch (err) {
     console.error(err)
+    return
   }
 
   const since = Date.now() - constants.TIME_WINDOW
