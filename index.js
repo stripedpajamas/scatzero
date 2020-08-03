@@ -60,7 +60,6 @@ class MessageStore {
   }
 
   goChannel (channel) {
-    dbg.info('going into channel %s', channel)
     if (!this.channelMsgs.has(channel)) {
       this.channelMsgs.set(channel, [])
     }
@@ -111,6 +110,18 @@ class MessageStore {
   getId (authorName) {
     if (ref.isFeed(authorName)) return authorName
     return Object.keys(this.nameMap).find(id => this.nameMap[id] === authorName) || authorName
+  }
+
+  getAuthorIds () {
+    return Object.keys(this.nameMap)
+  }
+
+  getAuthorNames () {
+    return Object.values(this.nameMap)
+  }
+
+  getChannels () {
+    return [...this.channelMsgs.keys()]
   }
 
   identifyAuthor (authorId, authorName) {
@@ -329,6 +340,35 @@ async function processor (diffy, server) {
             })
         }
       }
+    },
+    tabComplete: (line) => {
+      const split = line.split(' ')
+      let beginning = split.slice(0, split.length - 1).join(' ')
+      let lastWord = split[split.length - 1]
+      let matches = []
+      dbg.info({ line, split, beginning, lastWord })
+
+      if (split.length === 1 && lastWord[0] === '/') { // command
+        matches = ['/private ', '/public ', '/channel '].filter(cmd => cmd.startsWith(lastWord))
+      } else if (lastWord[0] === '@') { // author id
+        matches = msgs.getAuthorIds().filter(id => id.startsWith(lastWord))
+      } else if (lastWord[0] === '#') { // channel name
+        matches = msgs.getChannels().filter(name => name.startsWith(lastWord))
+      } else { // author names
+        matches = msgs.getAuthorNames().filter(name => name.startsWith(lastWord))
+      }
+
+      // keep a separation between what's being tab-completed and what came before
+      if (beginning) {
+        beginning = `${beginning} `
+      }
+
+      let idx = -1
+      return () => {
+        if (!matches.length) return line
+        const match = matches[++idx % matches.length]
+        return `${beginning}${match}`
+      }
     }
   }
 }
@@ -355,9 +395,24 @@ async function main () {
 
   const since = Date.now() - constants.TIME_WINDOW
   const diffy = Diffy({ fullscreen: true })
-  const { incoming, outgoing } = await processor(diffy, server)
+  const { incoming, outgoing, tabComplete } = await processor(diffy, server)
+
   // setup input listeners
+  let tabCompleter
   input.on('update', () => diffy.render())
+  input.on('keypress', (_, key) => {
+    // on any key press that isn't a tab, cancel tab completion
+    if (!key || (key && key.name !== 'tab')) {
+      tabCompleter = null
+      diffy.render()
+    }
+  })
+  input.on('tab', () => {
+    if (!tabCompleter) {
+      tabCompleter = tabComplete(input.rawLine())
+    }
+    input.set(tabCompleter())
+  })
   input.on('enter', outgoing)
 
   // pull data from sbot
