@@ -8,7 +8,8 @@ const colors = require('colorette')
 const wrap = require('word-wrap')
 const { version } = require('./package.json')
 
-const dbg = pino(pino.destination(2)) // log to stderr
+// allow debugging on stderr with `--debug`
+const dbg = process.argv.slice().includes('--debug') ? pino(pino.destination(2)) : { info: () => {} }
 
 const constants = {
   SYSTEM: 'scat',
@@ -22,11 +23,6 @@ const constants = {
     hour12: false
   },
   MESSAGE_TYPE: 'scat_message',
-  MODE: {
-    PUBLIC: 'PUBLIC',
-    PRIVATE: 'PRIVATE'
-  },
-  PROGRAM_DIR: '.scat',
   TIME_WINDOW: 7 * 24 * 60 * 60 * 1000, // 7 days
 }
 
@@ -375,9 +371,9 @@ async function processor (diffy, server) {
 
 async function main () {
   // don't waste time on tight terms
-  // we clip author names at 20
-  // timestamps are localized using ts()
-  // padding on authors and timestamps total to 6
+  //  - we clip author names at 20
+  //  - timestamps are localized using ts()
+  //  - padding on authors and timestamps total to 6
   // make sure we can at least fit timestamp+author+5 char msg
   constants.MIN_WIDTH = 20 + ts(Date.now()).length + 6 + 5
   if (process.stdout.columns < constants.MIN_WIDTH) {
@@ -399,6 +395,10 @@ async function main () {
 
   // setup input listeners
   let tabCompleter
+  input.on('ctrl-c', () => {
+    server.close()
+    process.exit()
+  })
   input.on('update', () => diffy.render())
   input.on('keypress', (_, key) => {
     // on any key press that isn't a tab, cancel tab completion
