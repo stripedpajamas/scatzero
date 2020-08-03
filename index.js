@@ -3,8 +3,10 @@ const input = require('diffy/input')()
 const pino = require('pino')
 const pull = require('pull-stream')
 const connect = require('ssb-client')
+const ref = require('ssb-ref')
 const colors = require('colorette')
 const wrap = require('word-wrap')
+const { version } = require('./package.json')
 
 const dbg = pino(pino.destination(2)) // log to stderr
 
@@ -35,19 +37,29 @@ function randomColor () {
   return colorList[Math.floor(Math.random() * colorList.length)]
 }
 
-
 class MessageStore {
   constructor () {
-    this.msgs = []
+    this.publicMsgs = []
+    this.privateMsgs = new Map() // [recps] => [msgs]
+    this.msgs = this.publicMsgs
     this.colorMap = {}
     this.nameMap = {}
     this.realMsgLength = 0
   }
 
-  getMaxMsgs () {
-    return process.stdout.rows - 3
+  goPrivate (recps) {
+    dbg.info([...this.privateMsgs.entries()])
+    const recpKey = recps.sort().toString()
+    if (!this.privateMsgs.has(recpKey)) {
+      this.privateMsgs.set(recpKey, [])
+    }
+    this.msgs = this.privateMsgs.get(recpKey)
   }
 
+  goPublic () {
+    this.msgs = this.publicMsgs
+  }
+  
   getAuthorColor (author) {
     if (!this.colorMap[author]) {
       this.colorMap[author] = randomColor()
@@ -60,17 +72,27 @@ class MessageStore {
   }
 
   addMsg (msg) {
-    this.msgs.push(msg)
-    this.msgs.sort((a, b) => a.sentAt - b.sentAt)
-    this.pretty() // calculates real msg length
-
-    if (this.realMsgLength > this.getMaxMsgs()) {
-      this.msgs.shift() // take one off the top
+    if (msg.private) {
+      const recpsKey = msg.recps.map(ref => ref.link).sort().toString()
+      if (!this.privateMsgs.has(recpsKey)) {
+        this.privateMsgs.set(recpsKey, [msg])
+      } else {
+        this.privateMsgs.get(recpsKey).push(msg)
+        this.privateMsgs.get(recpsKey).sort((a, b) => a.sentAt - b.sentAt)
+      }
+    } else {
+      this.publicMsgs.push(msg)
+      this.publicMsgs.sort((a, b) => a.sentAt - b.sentAt)
     }
   }
 
   getName (authorId) {
     return this.nameMap[authorId]
+  }
+
+  getId (authorName) {
+    if (ref.isFeed(authorName)) return authorName
+    return Object.keys(this.nameMap).find(id => this.nameMap[id] === authorName)
   }
 
   identifyAuthor (authorId, authorName) {
@@ -80,32 +102,42 @@ class MessageStore {
     }
 
     // find instances of the ID in the msg list and change it to name
-    for (let existingMsg of this.msgs) {
+    for (let existingMsg of this.publicMsgs) {
       if (existingMsg.author === authorId) {
         existingMsg.author = authorName
       }
     }
+
+    for (let [recps, privateMsgList] of this.privateMsgs.entries()) {
+      if (recps.includes(authorId)) {
+        for (let existingMsg of privateMsgList) {
+          existingMsg.author = authorName
+        }
+      }
+    }
+
   }
 
-  pretty () {
+  pretty (nonMsgSpace) {
     const msgList = this.msgs.map(({ author, timestamp, text }) => {
       const formattedTs = `[${gray(timestamp)}] `
       const formattedAuthor = `${this.colorAuthor(author)}: `
-      const wrappedText = wrap(text, { width: process.stdout.columns - formattedTs.length - formattedAuthor.length, indent: '' })
+      const wrappedText = wrap(text, {
+        width: process.stdout.columns - (author.length + 2) - (timestamp.length + 3),
+        indent: '',
+        cut: true
+      })
       const formattedText = wrappedText.split('\n')
         .map(line => author === constants.SYSTEM ? bgYellow(black(line)) : white(line))
         .join('\n')
       return `${formattedTs}${formattedAuthor}${formattedText}`
-    }).join('\n')
-    const lines = msgList.split('\n').length
-    const space = this.getMaxMsgs() - lines
-    const spaceLines = space > 0 ? '\n'.repeat(space) : ''
+    }).join('\n').split('\n')
 
-    this.realMsgLength = lines
+    while (msgList.length > process.stdout.rows - nonMsgSpace) {
+      msgList.shift() // remove single line from the top
+    }
 
-    dbg.info('we believe there are %d lines so we made %d lines of space', lines, spaceLines.length)
-
-    return `${msgList}${spaceLines}`
+    return `${msgList.join('\n')}`//${spaceLines}`
   }
 }
 
@@ -115,12 +147,56 @@ function ts (timestamp) {
   return new Intl.DateTimeFormat('default', constants.DATE_TIME_OPTS).format(ts) // TODO allow timezone to be configured
 }
 
+function systemMsg (msg) {
+  return { timestamp: ts(Date.now()), sentAt: Date.now(), author: constants.SYSTEM, text: msg }
+}
+
+function lineSize (args) {
+  return args.reduce((total, arg) => total + arg.split('\n').length, 0)
+}
+
 async function processor (diffy, server) {
   const msgs = new MessageStore()
   const meId = server.id
 
+  let state = {
+    recps: [],
+    private: false
+  }
+
+  function header () {
+    const inChannel = state.channel ? ` in ${state.channel}` : ''
+    let recps = state.recps.slice()
+    for (let i = 0; i < recps.length; i++) {
+      if (recps[i] === meId) {
+        recps.splice(i, 1) // remove exactly one instance of myself
+        break
+      }
+    }
+    recps = recps.map((id) => `${msgs.getName(id)} (${id})`)
+    const pubPriv = state.private ? `Chatting Privately with ${recps}` : `Chatting Publicly${inChannel}`
+    const front = `scat ${version} `
+    const hl = wrap(pubPriv, {
+      width: process.stdout.columns - front.length,
+      indent: ''
+    }).split('\n').map(line => bgWhite(black(line))).join('\n')
+    return `${front}${hl}\n`
+  }
+
+  function footer () {
+    return 'Commands: /private <name|id>  /public  /channel <name>\n'
+  }
+
+
   // setup ui
-  diffy.render(() => `${msgs.pretty()}\n> ${input.line()}`)
+  diffy.render(() => {
+    const head = header()
+    const foot = footer()
+    const inputLine = input.line()
+    const inputLineWrapped = wrap(inputLine, { width: process.stdout.columns - 2, indent: '', cut: true }) // 2 == '> '.length
+    const msgList = msgs.pretty(lineSize([head, foot, inputLineWrapped]))
+    return `${head}${msgList}\n\n${foot}\n> ${inputLine}`
+  })
 
   return {
     incoming: (msg) => {
@@ -143,6 +219,8 @@ async function processor (diffy, server) {
       const scatMsg = {
         timestamp: ts(msg.value.timestamp),
         sentAt: msg.value.timestamp,
+        private: msg.value.private,
+        recps: msg.value.content.recps,
         author: msgs.getName(msg.value.author) || msg.value.author,
         text: msg.value.content.text
       }
@@ -156,22 +234,52 @@ async function processor (diffy, server) {
         const cmdEnd = wordBreak > 0 ? wordBreak : line.length
         switch (line.substring(1, cmdEnd)) {
           case 'debug': {
-            dbg.info({ colorMap, msgs })
+            dbg.info(msgs)
+            dbg.info(state)
+            break
+          }
+          case 'public': {
+            msgs.goPublic()
+            state.private = false
+            state.recps = []
+            break
+          }
+          case 'private': {
+            const recps = line.slice(cmdEnd).trim().split(' ').filter(x => x).map(nameOrId => msgs.getId(nameOrId))
+            if (recps.length > 7) {
+              msgs.addMsg(systemMsg('Can only private message up to 7 recipients.'))
+            } else if (!server.private) {
+              msgs.addMsg(systemMsg('ssb-private plugin required to send private messages.'))
+            } else if (!recps.length) {
+              msgs.addMsg(systemMsg('Recipient name or id required.'))
+            } else if (!recps.every(recp => ref.isFeed(recp))) {
+              msgs.addMsg(systemMsg('Unknown identifier'))
+            } else {
+              recps.push(meId)
+              msgs.goPrivate(recps)
+              state.private = true
+              state.recps = recps
+            }
             break
           }
         }
       } else {
-        server.publish({ type: constants.MESSAGE_TYPE, text: line })
-          .catch((err) => {
-            msgs.push({
-              timestamp: ts(Date.now()),
-              sentAt: msg.value.timestamp,
-              author: constants.SYSTEM,
-              text: 'Failed to post message.'
+        if (state.private) {
+          const recpLinks = state.recps.map((id) => ({ link: id }))
+          server.private.publish({ type: constants.MESSAGE_TYPE, text: line, recps: recpLinks }, state.recps)
+            .catch((err) => {
+              msgs.addMsg(systemMsg('Failed to send private message.'))
+              diffy.render()
+              dbg.error(err)
             })
-            diffy.render()
-            dbg.error(err)
-          })
+        } else {
+          server.publish({ type: constants.MESSAGE_TYPE, text: line })
+            .catch((err) => {
+              msgs.addMsg(systemMsg('Failed to send message.'))
+              diffy.render()
+              dbg.error(err)
+            })
+        }
       }
     }
   }
