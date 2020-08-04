@@ -9,5 +9,8 @@
 		"ssb-client": "^4.9.0",
 		"ssb-ref": "^2.14.0",
 		"word-wrap": "^1.2.3"
+	},
+	"devDependencies": {
+		"nexe": "^3.3.7"
 	}
 }

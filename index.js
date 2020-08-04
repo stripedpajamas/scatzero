@@ -1,5 +1,5 @@
 const Diffy = require('diffy')
-const input = require('diffy/input')()
+const Input = require('diffy/input')
 const pino = require('pino')
 const pull = require('pull-stream')
 const connect = require('ssb-client')
@@ -194,7 +194,7 @@ function lineSize (args) {
   return args.reduce((total, arg) => total + arg.split('\n').length, 0)
 }
 
-async function processor (diffy, server) {
+async function processor (diffy, input, server) {
   const msgs = new MessageStore()
   const meId = server.id
 
@@ -391,7 +391,8 @@ async function main () {
 
   const since = Date.now() - constants.TIME_WINDOW
   const diffy = Diffy({ fullscreen: true })
-  const { incoming, outgoing, tabComplete } = await processor(diffy, server)
+  const input = Input()
+  const { incoming, outgoing, tabComplete } = await processor(diffy, input, server)
 
   // setup input listeners
   let tabCompleter
