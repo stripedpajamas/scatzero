@@ -1,6 +1,9 @@
 {
 	"name": "scat",
 	"version": "1.0.0",
+	"scripts": {
+		"build:all": "bash build.sh"
+	},
 	"dependencies": {
 		"colorette": "^1.2.1",
 		"diffy": "^2.1.0",

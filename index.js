@@ -1,3 +1,5 @@
+process.env.CHLORIDE_JS=1 // prefer pure JS crypto
+
 const Diffy = require('diffy')
 const Input = require('diffy/input')
 const pino = require('pino')
