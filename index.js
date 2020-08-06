@@ -11,7 +11,7 @@ const wrap = require('word-wrap')
 const { version } = require('./package.json')
 
 // allow debugging on stderr with `--debug`
-const dbg = process.argv.slice().includes('--debug') ? pino(pino.destination(2)) : { info: () => {} }
+const dbg = process.argv.slice().includes('--debug') ? pino(pino.destination(2)) : { info: () => {}, error: () => {} }
 
 const constants = {
   SYSTEM: 'scat',
@@ -247,6 +247,7 @@ async function processor (diffy, input, server) {
       if (!msgs.getName(msg.value.author) && server.about) {
         server.about.socialValue({ key: 'name', dest: msg.value.author })
           .then((authorName) => {
+            if (!authorName) return
             msgs.identifyAuthor(msg.value.author, authorName)
             diffy.render()
           })
