@@ -2,7 +2,8 @@
 	"name": "scat",
 	"version": "1.0.0",
 	"scripts": {
-		"build:all": "bash build.sh"
+		"build:all": "bash build.sh",
+		"build:mac": "nexe -o scat -i index.js -t mac-x64-12.9.1"
 	},
 	"dependencies": {
 		"colorette": "^1.2.1",
