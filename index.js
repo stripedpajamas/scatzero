@@ -208,7 +208,14 @@ async function processor (diffy, input, server) {
 
   function header () {
     const inChannel = state.channel ? ` in ${state.channel}` : ''
-    let recps = [...new Set(state.recps)].map((id) => `${msgs.getName(id)} (${id})`)
+    let recps = state.recps.slice()
+    for (let i = 0; i < recps.length; i++) {
+      if (recps[i] === meId) {
+        recps.splice(i, 1)
+        break
+      }
+    }
+    recps = recps.map((id) => `${msgs.getName(id)} (${id})`)
     const pubPriv = state.private ? `Chatting Privately with ${recps}` : `Chatting Publicly${inChannel}`
     const front = `scat ${version} `
     const hl = wrap(pubPriv, {
