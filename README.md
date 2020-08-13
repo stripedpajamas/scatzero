@@ -1,5 +1,5 @@
 # scat
-## tiny chat-like CLI built on scuttlebutt
+#### tiny chat-like CLI built on scuttlebutt
 
 ### Requirements:
 - scuttlebutt server running (like Patchwork or Patchbay)
