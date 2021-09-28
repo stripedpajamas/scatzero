@@ -6,7 +6,7 @@
 - ssb-private and ssb-about plugins installed
 
 ### Install
-- Prebuilt: download from https://squi.cc/misc/scat.html
+- ~~Prebuilt: download from https://squi.cc/misc/scat.html~~
 - Run from source: clone this repo, run `npm install`, then `node index.js`
 
 ### Shortcuts
